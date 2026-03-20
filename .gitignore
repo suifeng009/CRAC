@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Session and state files
+config.json
+crac_session.json
+notified_exams.json
+已发现的考试记录.txt
+
+# Logs
+*.log
+
+# Sensitive config
+config.py
