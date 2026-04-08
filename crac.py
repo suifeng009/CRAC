@@ -41,6 +41,10 @@ try:
     WECHAT_SECRET = getattr(config, 'WECHAT_SECRET', '')
     WECHAT_AGENT_ID = getattr(config, 'WECHAT_AGENT_ID', '')
 
+    # --- [ 钉钉推送设置 ] ---
+    DINGTALK_WEBHOOK = getattr(config, 'DINGTALK_WEBHOOK', '')
+    DINGTALK_SECRET = getattr(config, 'DINGTALK_SECRET', '')
+
     # --- [ 监控规则设置 ] ---
     TARGET_PROVINCES = getattr(config, 'TARGET_PROVINCES', ['福建'])
     TARGET_CITIES = getattr(config, 'TARGET_CITIES', [])
@@ -51,6 +55,10 @@ except ImportError:
     WECHAT_CORP_ID = ''
     WECHAT_SECRET = ''
     WECHAT_AGENT_ID = ''
+
+    # --- [ 钉钉推送设置 ] ---
+    DINGTALK_WEBHOOK = ''
+    DINGTALK_SECRET = ''
 
     # --- [ 监控规则设置 ] ---
     TARGET_PROVINCES = ['福建']
@@ -64,6 +72,12 @@ import urllib3
 import json
 import time
 import os
+import sys
+from datetime import datetime
+import hmac
+import hashlib
+import base64
+import urllib.parse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -88,8 +102,9 @@ COMMON_HEADERS = {
 }
 
 def send_wechat_msg(content):
+    """发送企业微信通知。"""
     if not WECHAT_CORP_ID or not WECHAT_SECRET or not WECHAT_AGENT_ID:
-        print("⚠️ 未配置企业微信信息，跳过推送 (若不需要此功能可忽略)")
+        print("⚠️ 企微推送参数不全，跳过推送。")
         return
         
     token_url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={WECHAT_CORP_ID}&corpsecret={WECHAT_SECRET}"
@@ -106,9 +121,40 @@ def send_wechat_msg(content):
                 "safe": 0
             }
             requests.post(send_url, json=payload, verify=False, timeout=10)
-            print("✅ 企微推送成功")
+            print("✅ 企微推送成功！")
     except Exception as e:
-        print(f"❌ 企微推送异常或网络错误: {e}")
+        print(f"❌ 企微推送异常: {e}")
+
+def send_dingtalk_msg(content):
+    """发送钉钉机器人通知。"""
+    if not DINGTALK_WEBHOOK:
+        return
+
+    url = DINGTALK_WEBHOOK
+    if DINGTALK_SECRET:
+        timestamp = str(round(time.time() * 1000))
+        secret_enc = DINGTALK_SECRET.encode('utf-8')
+        string_to_sign = f'{timestamp}\n{DINGTALK_SECRET}'
+        string_to_sign_enc = string_to_sign.encode('utf-8')
+        hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+        
+        if "?" in url:
+            url = f"{url}&timestamp={timestamp}&sign={sign}"
+        else:
+            url = f"{url}?timestamp={timestamp}&sign={sign}"
+
+    payload = {
+        "msgtype": "text",
+        "text": {
+            "content": content
+        }
+    }
+    try:
+        requests.post(url, json=payload, verify=False, timeout=10)
+        print("✅ 钉钉推送成功！")
+    except Exception as e:
+        print(f"❌ 钉钉推送异常: {e}")
 
 def monitor_exams(province_input):
     p_id = ""
@@ -118,7 +164,7 @@ def monitor_exams(province_input):
             p_id, p_name = id_val, name
             break
     if not p_id:
-        print(f"未能匹配省份: {province_input}")
+        print(f"⚠️ 未能匹配省份: {province_input}")
         return
 
     query_url = 'https://zhipu.allspectrum.cn:9528/CRAC/app/exam_exam/getExamList'
@@ -153,6 +199,8 @@ def monitor_exams(province_input):
                 continue
             city = exam.get("city", {}).get("name", "未知")
             title = exam.get("adviceName", "")
+            
+            # 城市匹配逻辑
             is_match = not TARGET_CITIES
             if not is_match:
                 for t in TARGET_CITIES:
@@ -174,17 +222,49 @@ def monitor_exams(province_input):
         
         if found_new:
             send_wechat_msg(msg)
+            send_dingtalk_msg(msg)
             with open(NOTIFIED_EXAMS_FILE, 'w') as f:
                 json.dump(history[-500:], f)
+            print(f"✅ 【{p_name}】发现新考试并已推送。")
         else:
             print(f"👀 【{p_name}】暂无符合条件的新数据。")
             
     except Exception as e:
         print(f"❌ 抓取失败: {str(e)}")
 
+def check_time_window():
+    """检查当前是否处于 [朝九晚五] 巡查时段，或是否为首次启动提权。"""
+    now = datetime.now()
+    # 核心逻辑：只在 9:00 到 17:00 期间执行
+    is_work_time = 9 <= now.hour < 17
+    
+    # 检查是否存在首次启动标记文件
+    first_run_flag = os.path.join(BASE_DIR, '.first_run')
+    if os.path.exists(first_run_flag):
+        try:
+            os.remove(first_run_flag)
+        except:
+            pass
+        return True, "🚀 首次执行提权：已检测到启动标记，本轮巡查不受时间段限制。"
+        
+    if is_work_time:
+        return True, f"⏰ 当前时间 {now.strftime('%H:%M:%S')} 处于 [朝九晚五] 预定巡查时段。"
+    
+    return False, f"💤 当前时间 {now.strftime('%H:%M:%S')} 不在工作时间内，系统进入休眠挂起状态..."
+
 if __name__ == '__main__':
-    print("🚀 开始免登录抓取考试信息...")
+    print("========================================================================")
+    print("🌟 CRAC 考试监控中枢引擎 (免登录直连版)")
+    print("========================================================================")
+    
+    can_run, reason = check_time_window()
+    print(reason)
+    
+    if not can_run:
+        sys.exit(0)
+
+    print("🚀 开始执行本轮巡查...")
     for idx, province in enumerate(TARGET_PROVINCES):
         monitor_exams(province)
         if idx < len(TARGET_PROVINCES) - 1:
-            time.sleep(1.0) # 短暂延时即可
+            time.sleep(1.0)

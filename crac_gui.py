@@ -12,6 +12,10 @@ import sys
 import winreg
 import pystray
 from PIL import Image, ImageDraw
+import hmac
+import hashlib
+import base64
+import urllib.parse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -51,8 +55,8 @@ class CRACMonitorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("CRAC考试查询助手---XD (免登录极速版)")
-        self.root.geometry("860x520")
-        self.root.minsize(700, 500)
+        self.root.geometry("860x580")
+        self.root.minsize(700, 560)
         
         # 居中显示窗口
         self.root.eval('tk::PlaceWindow . center')
@@ -81,6 +85,8 @@ class CRACMonitorGUI:
         self.corpid_var = tk.StringVar()
         self.secret_var = tk.StringVar()
         self.agentid_var = tk.StringVar()
+        self.ding_webhook_var = tk.StringVar()
+        self.ding_secret_var = tk.StringVar()
         
         # Grid 布局排版
         ttk.Label(config_frame, text="监控省份:").grid(row=0, column=0, sticky=tk.W, pady=4)
@@ -106,6 +112,12 @@ class CRACMonitorGUI:
         
         ttk.Label(config_frame, text="企微 AgentID:").grid(row=5, column=0, sticky=tk.W, pady=4)
         ttk.Entry(config_frame, textvariable=self.agentid_var, width=18).grid(row=5, column=1, sticky=tk.EW, pady=4)
+
+        ttk.Label(config_frame, text="钉钉 Webhook:").grid(row=6, column=0, sticky=tk.W, pady=4)
+        ttk.Entry(config_frame, textvariable=self.ding_webhook_var).grid(row=6, column=1, columnspan=3, sticky=tk.EW, pady=4)
+
+        ttk.Label(config_frame, text="钉钉 加签Secret:").grid(row=7, column=0, sticky=tk.W, pady=4)
+        ttk.Entry(config_frame, textvariable=self.ding_secret_var, show="*").grid(row=7, column=1, columnspan=3, sticky=tk.EW, pady=4)
         
         # 让输入框根据窗口拉伸自动填充
         config_frame.columnconfigure(1, weight=1)
@@ -268,6 +280,8 @@ class CRACMonitorGUI:
                     self.corpid_var.set(cfg.get("corpid", ""))
                     self.secret_var.set(cfg.get("secret", ""))
                     self.agentid_var.set(cfg.get("agentid", ""))
+                    self.ding_webhook_var.set(cfg.get("ding_webhook", ""))
+                    self.ding_secret_var.set(cfg.get("ding_secret", ""))
                 self.log("已加载上次的配置记录。")
             except Exception as e:
                 self.log(f"⚠️ 读取配置失败: {e}")
@@ -279,7 +293,9 @@ class CRACMonitorGUI:
             "exam_type": self.exam_type_var.get(),
             "corpid": self.corpid_var.get(),
             "secret": self.secret_var.get(),
-            "agentid": self.agentid_var.get()
+            "agentid": self.agentid_var.get(),
+            "ding_webhook": self.ding_webhook_var.get(),
+            "ding_secret": self.ding_secret_var.get()
         }
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -336,6 +352,40 @@ class CRACMonitorGUI:
                 self.log("✅ 企微推送成功！")
         except Exception as e:
             self.log(f"❌ 企微推送异常: {e}")
+
+    def send_dingtalk_msg(self, content):
+        webhook = self.ding_webhook_var.get().strip()
+        secret = self.ding_secret_var.get().strip()
+        if not webhook:
+            self.log("⚠️ 钉钉推送Webhook未配置，跳过推送。")
+            return
+
+        url = webhook
+        if secret:
+            timestamp = str(round(time.time() * 1000))
+            secret_enc = secret.encode('utf-8')
+            string_to_sign = f'{timestamp}\n{secret}'
+            string_to_sign_enc = string_to_sign.encode('utf-8')
+            hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
+            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+            
+            # append safely
+            if "?" in url:
+                url = f"{url}&timestamp={timestamp}&sign={sign}"
+            else:
+                url = f"{url}?timestamp={timestamp}&sign={sign}"
+
+        payload = {
+            "msgtype": "text",
+            "text": {
+                "content": content
+            }
+        }
+        try:
+            requests.post(url, json=payload, verify=False, timeout=10)
+            self.log("✅ 钉钉推送成功！")
+        except Exception as e:
+            self.log(f"❌ 钉钉推送异常: {e}")
 
     def notify_desktop(self, title, msg):
         import winsound
@@ -421,6 +471,7 @@ class CRACMonitorGUI:
             
             if found_new:
                 self.send_wechat_msg(msg)
+                self.send_dingtalk_msg(msg)
                 with open(NOTIFIED_EXAMS_FILE, 'w') as f:
                     json.dump(history[-500:], f)
                 
